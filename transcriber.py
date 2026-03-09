@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,7 +40,7 @@ class TranscriptionPipeline:
     def get_whisper_binary() -> Optional[Path]:
         """尋找 whisper.cpp 可執行檔。"""
         for candidate in WHISPER_CANDIDATES:
-            if candidate.exists() and candidate.is_file():
+            if candidate.exists() and candidate.is_file() and os.access(candidate, os.X_OK):
                 return candidate
         return None
 
@@ -52,6 +53,24 @@ class TranscriptionPipeline:
         if not model_path.exists():
             return False, f"模型不存在：{model_path}"
         return True, f"模型可用：{model_path}"
+
+    @staticmethod
+    def build_whisper_command(whisper_bin: Path, model_name: str, seg: Path, seg_txt_prefix: Path) -> List[str]:
+        """建立 whisper.cpp 指令。
+
+        whisper-cli 與 main 在本流程使用的參數（-m/-f/-of/-otxt/-nt）可相容。
+        """
+        return [
+            str(whisper_bin),
+            "-m",
+            str(MODEL_PATHS[model_name]),
+            "-f",
+            str(seg),
+            "-of",
+            str(seg_txt_prefix),
+            "-otxt",
+            "-nt",
+        ]
 
     def run(
         self,
@@ -81,9 +100,17 @@ class TranscriptionPipeline:
 
             whisper_bin = self.get_whisper_binary()
             if whisper_bin is None:
-                msg = "找不到 whisper.cpp 可執行檔，請確認 main 或 whisper-cli 存在。"
+                candidates = "\n".join(str(path) for path in WHISPER_CANDIDATES)
+                msg = (
+                    "找不到可執行的 whisper.cpp 執行檔。\n"
+                    "已檢查以下候選路徑（依優先順序）：\n"
+                    f"{candidates}\n"
+                    "請先確認 whisper-cli 已編譯並具有執行權限。"
+                )
                 logger.error(msg)
                 return TranscriptionResult(False, msg, log_file=log_file)
+
+            logger.info("使用 whisper 執行檔：%s", whisper_bin)
 
             # 1) m4a -> wav
             update("將 m4a 轉成 wav", 15)
@@ -150,18 +177,9 @@ class TranscriptionPipeline:
                 seg_progress = 55 + int((idx / len(segment_files)) * 35)
                 update(f"轉寫第 {idx}/{len(segment_files)} 段：{seg.name}", seg_progress)
 
+                cmd = self.build_whisper_command(whisper_bin, model_name, seg, seg_txt_prefix)
                 ok, msg = run_command(
-                    [
-                        str(whisper_bin),
-                        "-m",
-                        str(MODEL_PATHS[model_name]),
-                        "-f",
-                        str(seg),
-                        "-of",
-                        str(seg_txt_prefix),
-                        "-otxt",
-                        "-nt",
-                    ],
+                    cmd,
                     logger,
                     f"whisper 轉寫 {seg.name}",
                     cwd=CONFIG.whisper_cpp_root,

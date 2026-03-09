@@ -43,9 +43,10 @@ MODEL_PATHS: Dict[str, Path] = {
     "large-v3-turbo": CONFIG.models_root / "ggml-large-v3-turbo.bin",
 }
 
-# whisper.cpp 主程式。常見檔名可能是 main 或 whisper-cli，這裡優先 main。
+# whisper.cpp 執行檔候選：優先使用 whisper-cli，main 僅作為後備。
 WHISPER_CANDIDATES = [
-    CONFIG.whisper_cpp_root / "main",
-    CONFIG.whisper_cpp_root / "build/bin/main",
     CONFIG.whisper_cpp_root / "build/bin/whisper-cli",
+    CONFIG.whisper_cpp_root / "whisper-cli",
+    CONFIG.whisper_cpp_root / "build/bin/main",
+    CONFIG.whisper_cpp_root / "main",
 ]
