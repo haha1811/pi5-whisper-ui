@@ -1,7 +1,4 @@
-"""Streamlit 單頁式 UI。
-
-提供上傳、參數設定、流程執行、進度與結果下載。
-"""
+"""Streamlit 單頁式 UI。"""
 
 from __future__ import annotations
 
@@ -9,7 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from config import CONFIG, MODEL_PATHS
+from config import CONFIG, LANGUAGE_OPTIONS, MODEL_PATHS
 from transcriber import TranscriptionPipeline, model_status
 from utils import ensure_dir, read_log_tail
 
@@ -29,7 +26,6 @@ def main() -> None:
     ensure_dir(CONFIG.output_root)
     ensure_dir(CONFIG.log_root)
 
-    # 頁面載入時先做模型檢查
     st.subheader("模型檢查")
     status = model_status()
     for model_name in ["small", "medium", "large-v3-turbo"]:
@@ -44,7 +40,7 @@ def main() -> None:
     with st.form("transcribe_form"):
         uploaded = st.file_uploader("上傳 m4a 錄音檔", type=["m4a"])
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             segment_minutes = st.number_input(
                 "分段長度（分鐘）",
@@ -58,10 +54,25 @@ def main() -> None:
                 "選擇模型",
                 options=["small", "medium", "large-v3-turbo"],
                 index=["small", "medium", "large-v3-turbo"].index(CONFIG.default_model_name),
-                help="small：速度較快，資源較省\n\nmedium：速度與品質平衡\n\nlarge-v3-turbo：品質較高，但 Pi5 執行較慢",
+            )
+        with col3:
+            language = st.selectbox(
+                "辨識語言",
+                options=LANGUAGE_OPTIONS,
+                index=LANGUAGE_OPTIONS.index(CONFIG.default_language),
+                help="auto=自動判斷；zh=中文；en=英文；ja=日文",
             )
 
-        st.info(f"模型說明：**{model_name}** - {MODEL_DESCRIPTIONS[model_name]}")
+        threads = st.number_input(
+            "執行緒數（threads）",
+            min_value=1,
+            max_value=32,
+            value=CONFIG.default_threads,
+            step=1,
+        )
+
+        st.info(f"模型：**{model_name}** - {MODEL_DESCRIPTIONS[model_name]}")
+        st.info(f"目前語言設定：**{language}**；執行緒：**{int(threads)}**")
 
         keep_intermediate = st.checkbox("保留中間檔（wav、分段 wav、分段 txt）", value=False)
         output_root_input = st.text_input("輸出目錄", value=str(CONFIG.output_root))
@@ -75,7 +86,6 @@ def main() -> None:
         st.error("請先上傳 .m4a 檔案。")
         return
 
-    # 執行前再次檢查模型
     pipeline = TranscriptionPipeline(output_root=Path(output_root_input), log_root=CONFIG.log_root)
     ok, msg = pipeline.check_model_exists(model_name)
     if not ok:
@@ -88,21 +98,35 @@ def main() -> None:
 
     progress_bar = st.progress(0)
     status_placeholder = st.empty()
+    command_placeholder = st.empty()
+    live_log_placeholder = st.empty()
+    live_log_lines: list[str] = []
 
     def on_progress(step: str, pct: int) -> None:
         progress_bar.progress(max(0, min(100, pct)))
         status_placeholder.info(f"目前步驟：{step}（{pct}%）")
+        if step.startswith("whisper-cli 指令："):
+            command_placeholder.code(step.removeprefix("whisper-cli 指令："), language="bash")
+
+    def on_log(line: str) -> None:
+        live_log_lines.append(line)
+        # 控制 UI 長度，僅保留最近 120 行
+        display = "\n".join(live_log_lines[-120:])
+        live_log_placeholder.code(display, language="log")
 
     result = pipeline.run(
         input_m4a=input_path,
         model_name=model_name,
+        language=language,
+        threads=int(threads),
         segment_minutes=int(segment_minutes),
         keep_intermediate=keep_intermediate,
         progress_cb=on_progress,
+        log_cb=on_log,
     )
 
     if result.log_file:
-        st.subheader("執行 Log")
+        st.subheader("執行 Log（檔案尾端）")
         st.code(read_log_tail(result.log_file), language="log")
 
     if not result.success:
