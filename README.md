@@ -116,3 +116,73 @@ http://<你的_pi_ip>:8501
 - **資源可控**：以分段方式處理長音檔，避免一次吃滿記憶體。
 - **保留既有能力**：直接呼叫你已可用的 `ffmpeg` 與 `whisper.cpp`，不重寫辨識核心。
 - **路徑集中管理**：非程式背景也能在 `config.py` 直接調整環境。
+
+
+## systemd 開機自動啟動（Raspberry Pi 5 + SSD）
+
+以下指令都以實際專案路徑為準：
+`/mnt/ssd/workspace/pi5-whisper-ui`
+
+### 1) service 檔名稱
+
+建議使用：`pi5-whisper-ui.service`
+
+### 2) 範本檔位置
+
+本專案已提供：
+
+- `deploy/systemd/pi5-whisper-ui.service`
+- `scripts/install-service.sh`
+
+### 3) 先確認 service 內的執行使用者
+
+打開 `deploy/systemd/pi5-whisper-ui.service`，將：
+
+- `User=haha`
+- `Group=haha`
+
+改成你 Pi 上實際要跑服務的帳號（例如 `pi` 或你的自訂帳號）。
+
+### 4) 安裝 service（建議）
+
+```bash
+cd /mnt/ssd/workspace/pi5-whisper-ui
+sudo bash scripts/install-service.sh
+```
+
+### 5) 手動安裝方式（不使用腳本）
+
+```bash
+sudo cp /mnt/ssd/workspace/pi5-whisper-ui/deploy/systemd/pi5-whisper-ui.service /etc/systemd/system/pi5-whisper-ui.service
+sudo systemctl daemon-reload
+sudo systemctl enable pi5-whisper-ui.service
+sudo systemctl start pi5-whisper-ui.service
+```
+
+### 6) 常用管理指令
+
+```bash
+# 狀態
+sudo systemctl status pi5-whisper-ui.service
+
+# 持續看 log
+sudo journalctl -u pi5-whisper-ui.service -f
+
+# 最近 200 行 log
+sudo journalctl -u pi5-whisper-ui.service -n 200 --no-pager
+
+# 重啟 / 停止 / 啟動
+sudo systemctl restart pi5-whisper-ui.service
+sudo systemctl stop pi5-whisper-ui.service
+sudo systemctl start pi5-whisper-ui.service
+```
+
+### 7) 設計重點與注意事項
+
+- `WorkingDirectory` 已固定為 `/mnt/ssd/workspace/pi5-whisper-ui`。
+- `ExecStart` 使用 venv 內 Python：
+  `/mnt/ssd/workspace/pi5-whisper-ui/.venv/bin/python -m streamlit ...`
+- 使用 `RequiresMountsFor=/mnt/ssd/...`，可降低開機時 SSD 尚未掛載導致啟動失敗的機率。
+- `Restart=on-failure` + `StartLimitIntervalSec/StartLimitBurst`，避免例外時無限快速重啟。
+- `--server.headless true` 與 `STREAMLIT_SERVER_HEADLESS=true` 已一併設定，適合背景服務。
+
