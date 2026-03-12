@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List
+from typing import Any, List
 
 from config import CONFIG
 from utils import ensure_dir
@@ -28,6 +28,24 @@ class HistoryRecord:
     output_directory: str
 
 
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class HistoryStore:
     def __init__(self, db_path: Path = CONFIG.history_db_path) -> None:
         self.db_path = db_path
@@ -37,6 +55,9 @@ class HistoryStore:
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
+
+    def _get_columns(self, conn: sqlite3.Connection) -> set[str]:
+        return {row[1] for row in conn.execute("PRAGMA table_info(history)").fetchall()}
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -61,13 +82,8 @@ class HistoryStore:
     def _migrate_schema_if_needed(self) -> None:
         """舊版欄位相容：若缺欄位就補上，避免舊 DB 造成頁面 crash。"""
         with self._connect() as conn:
-            cols = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(history)").fetchall()
-            }
+            cols = self._get_columns(conn)
 
-            # 舊版欄位名稱相容策略：audio_duration/threads/processing_time
-            # 新增並統一到 *_seconds / threads_used。
             if "audio_duration_seconds" not in cols:
                 conn.execute("ALTER TABLE history ADD COLUMN audio_duration_seconds REAL NOT NULL DEFAULT 0")
             if "threads_used" not in cols:
@@ -79,7 +95,8 @@ class HistoryStore:
             if "cpu_logical_cores" not in cols:
                 conn.execute("ALTER TABLE history ADD COLUMN cpu_logical_cores INTEGER NOT NULL DEFAULT 1")
 
-            # 若舊欄位存在，將資料補到新欄位（只在新欄位為預設值時覆蓋）。
+            # 重新讀取欄位，處理資料搬移
+            cols = self._get_columns(conn)
             if "audio_duration" in cols:
                 conn.execute(
                     """
@@ -105,7 +122,6 @@ class HistoryStore:
                     """
                 )
 
-            # 若 rtf 尚未計算，補算一次。
             conn.execute(
                 """
                 UPDATE history
@@ -129,35 +145,55 @@ class HistoryStore:
         cpu_logical_cores: int,
         output_directory: Path,
     ) -> None:
+        """寫入一筆使用紀錄。
+
+        為了相容舊版 schema，若舊欄位（audio_duration/processing_time/threads）存在，
+        也會同步寫入，避免 NOT NULL constraint 錯誤。
+        """
+        ad = _to_float(audio_duration_seconds, 0.0)
+        pt = _to_float(processing_time_seconds, 0.0)
+        rtf_value = _to_float(rtf, 0.0)
+        th = _to_int(threads_used, 1)
+        cores = _to_int(cpu_logical_cores, 1)
+
         with self._connect() as conn:
+            cols = self._get_columns(conn)
+
+            payload: dict[str, Any] = {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "filename": filename or "unknown",
+                "model": model or "unknown",
+                "language": language or "unknown",
+                "output_directory": str(output_directory),
+            }
+
+            # 新版欄位
+            if "audio_duration_seconds" in cols:
+                payload["audio_duration_seconds"] = ad
+            if "threads_used" in cols:
+                payload["threads_used"] = max(1, th)
+            if "processing_time_seconds" in cols:
+                payload["processing_time_seconds"] = max(0.0, pt)
+            if "rtf" in cols:
+                payload["rtf"] = max(0.0, rtf_value)
+            if "cpu_logical_cores" in cols:
+                payload["cpu_logical_cores"] = max(1, cores)
+
+            # 舊版欄位（關鍵：避免舊 DB 的 NOT NULL 欄位 insert 失敗）
+            if "audio_duration" in cols:
+                payload["audio_duration"] = ad
+            if "threads" in cols:
+                payload["threads"] = max(1, th)
+            if "processing_time" in cols:
+                payload["processing_time"] = max(0.0, pt)
+
+            columns = ", ".join(payload.keys())
+            placeholders = ", ".join(["?"] * len(payload))
+            values = tuple(payload.values())
+
             conn.execute(
-                """
-                INSERT INTO history (
-                    timestamp,
-                    filename,
-                    audio_duration_seconds,
-                    model,
-                    language,
-                    threads_used,
-                    processing_time_seconds,
-                    rtf,
-                    cpu_logical_cores,
-                    output_directory
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    datetime.now().isoformat(timespec="seconds"),
-                    filename,
-                    audio_duration_seconds,
-                    model,
-                    language,
-                    threads_used,
-                    processing_time_seconds,
-                    rtf,
-                    cpu_logical_cores,
-                    str(output_directory),
-                ),
+                f"INSERT INTO history ({columns}) VALUES ({placeholders})",
+                values,
             )
 
     def list_records(self) -> List[HistoryRecord]:

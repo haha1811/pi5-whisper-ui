@@ -278,17 +278,21 @@ def main() -> None:
 
     history = HistoryStore()
     if result.output_directory:
-        history.add_record(
-            filename=safe_name,
-            audio_duration_seconds=audio_duration_seconds,
-            model=model_name,
-            language=language,
-            threads_used=threads_used,
-            processing_time_seconds=processing_time_seconds,
-            rtf=rtf,
-            cpu_logical_cores=cpu_cores,
-            output_directory=result.output_directory,
-        )
+        try:
+            history.add_record(
+                filename=safe_name,
+                audio_duration_seconds=audio_duration_seconds,
+                model=model_name,
+                language=language,
+                threads_used=threads_used,
+                processing_time_seconds=processing_time_seconds,
+                rtf=rtf,
+                cpu_logical_cores=cpu_cores,
+                output_directory=result.output_directory,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 使用紀錄寫入失敗不應影響主流程完成與下載。
+            st.warning(f"使用紀錄寫入失敗：{exc}")
 
     update_state(
         status="completed",
