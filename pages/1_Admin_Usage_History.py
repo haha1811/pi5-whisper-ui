@@ -37,8 +37,11 @@ else:
             "filename": r.filename,
             "model": r.model,
             "language": r.language,
-            "threads": r.threads,
-            "processing_time": format_seconds(r.processing_time),
+            "threads": r.threads_used,
+            "cpu_cores": r.cpu_logical_cores,
+            "audio_duration": format_seconds(r.audio_duration_seconds),
+            "processing_time": format_seconds(r.processing_time_seconds),
+            "rtf": f"{r.rtf:.2f}x",
             "output_path": r.output_directory,
         }
         for r in records

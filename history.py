@@ -18,11 +18,13 @@ class HistoryRecord:
     id: int
     timestamp: str
     filename: str
-    audio_duration: float
+    audio_duration_seconds: float
     model: str
     language: str
-    threads: int
-    processing_time: float
+    threads_used: int
+    processing_time_seconds: float
+    rtf: float
+    cpu_logical_cores: int
     output_directory: str
 
 
@@ -31,6 +33,7 @@ class HistoryStore:
         self.db_path = db_path
         ensure_dir(self.db_path.parent)
         self._init_db()
+        self._migrate_schema_if_needed()
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -43,40 +46,116 @@ class HistoryStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
                     filename TEXT NOT NULL,
-                    audio_duration REAL NOT NULL,
+                    audio_duration_seconds REAL NOT NULL DEFAULT 0,
                     model TEXT NOT NULL,
                     language TEXT NOT NULL,
-                    threads INTEGER NOT NULL,
-                    processing_time REAL NOT NULL,
+                    threads_used INTEGER NOT NULL DEFAULT 1,
+                    processing_time_seconds REAL NOT NULL DEFAULT 0,
+                    rtf REAL NOT NULL DEFAULT 0,
+                    cpu_logical_cores INTEGER NOT NULL DEFAULT 1,
                     output_directory TEXT NOT NULL
                 )
+                """
+            )
+
+    def _migrate_schema_if_needed(self) -> None:
+        """舊版欄位相容：若缺欄位就補上，避免舊 DB 造成頁面 crash。"""
+        with self._connect() as conn:
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(history)").fetchall()
+            }
+
+            # 舊版欄位名稱相容策略：audio_duration/threads/processing_time
+            # 新增並統一到 *_seconds / threads_used。
+            if "audio_duration_seconds" not in cols:
+                conn.execute("ALTER TABLE history ADD COLUMN audio_duration_seconds REAL NOT NULL DEFAULT 0")
+            if "threads_used" not in cols:
+                conn.execute("ALTER TABLE history ADD COLUMN threads_used INTEGER NOT NULL DEFAULT 1")
+            if "processing_time_seconds" not in cols:
+                conn.execute("ALTER TABLE history ADD COLUMN processing_time_seconds REAL NOT NULL DEFAULT 0")
+            if "rtf" not in cols:
+                conn.execute("ALTER TABLE history ADD COLUMN rtf REAL NOT NULL DEFAULT 0")
+            if "cpu_logical_cores" not in cols:
+                conn.execute("ALTER TABLE history ADD COLUMN cpu_logical_cores INTEGER NOT NULL DEFAULT 1")
+
+            # 若舊欄位存在，將資料補到新欄位（只在新欄位為預設值時覆蓋）。
+            if "audio_duration" in cols:
+                conn.execute(
+                    """
+                    UPDATE history
+                    SET audio_duration_seconds = audio_duration
+                    WHERE audio_duration_seconds = 0
+                    """
+                )
+            if "threads" in cols:
+                conn.execute(
+                    """
+                    UPDATE history
+                    SET threads_used = threads
+                    WHERE threads_used = 1
+                    """
+                )
+            if "processing_time" in cols:
+                conn.execute(
+                    """
+                    UPDATE history
+                    SET processing_time_seconds = processing_time
+                    WHERE processing_time_seconds = 0
+                    """
+                )
+
+            # 若 rtf 尚未計算，補算一次。
+            conn.execute(
+                """
+                UPDATE history
+                SET rtf = CASE
+                    WHEN audio_duration_seconds > 0 THEN processing_time_seconds / audio_duration_seconds
+                    ELSE 0
+                END
+                WHERE rtf = 0
                 """
             )
 
     def add_record(
         self,
         filename: str,
-        audio_duration: float,
+        audio_duration_seconds: float,
         model: str,
         language: str,
-        threads: int,
-        processing_time: float,
+        threads_used: int,
+        processing_time_seconds: float,
+        rtf: float,
+        cpu_logical_cores: int,
         output_directory: Path,
     ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO history (timestamp, filename, audio_duration, model, language, threads, processing_time, output_directory)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO history (
+                    timestamp,
+                    filename,
+                    audio_duration_seconds,
+                    model,
+                    language,
+                    threads_used,
+                    processing_time_seconds,
+                    rtf,
+                    cpu_logical_cores,
+                    output_directory
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.now().isoformat(timespec="seconds"),
                     filename,
-                    audio_duration,
+                    audio_duration_seconds,
                     model,
                     language,
-                    threads,
-                    processing_time,
+                    threads_used,
+                    processing_time_seconds,
+                    rtf,
+                    cpu_logical_cores,
                     str(output_directory),
                 ),
             )
@@ -85,7 +164,18 @@ class HistoryStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, timestamp, filename, audio_duration, model, language, threads, processing_time, output_directory
+                SELECT
+                    id,
+                    timestamp,
+                    filename,
+                    audio_duration_seconds,
+                    model,
+                    language,
+                    threads_used,
+                    processing_time_seconds,
+                    rtf,
+                    cpu_logical_cores,
+                    output_directory
                 FROM history
                 ORDER BY id DESC
                 """
@@ -100,7 +190,18 @@ class HistoryStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, timestamp, filename, audio_duration, model, language, threads, processing_time, output_directory
+                SELECT
+                    id,
+                    timestamp,
+                    filename,
+                    audio_duration_seconds,
+                    model,
+                    language,
+                    threads_used,
+                    processing_time_seconds,
+                    rtf,
+                    cpu_logical_cores,
+                    output_directory
                 FROM history
                 WHERE id = ?
                 """,

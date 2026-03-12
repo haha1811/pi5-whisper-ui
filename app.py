@@ -9,7 +9,7 @@ import streamlit as st
 
 from config import CONFIG, LANGUAGE_OPTIONS, MODEL_PATHS
 from history import HistoryStore
-from monitor import get_system_usage
+from monitor import get_cpu_logical_cores, get_system_usage
 from transcriber import TranscriptionPipeline, model_status
 from utils import ensure_dir, format_seconds, read_log_tail
 
@@ -30,14 +30,20 @@ def main() -> None:
     ensure_dir(CONFIG.log_root)
     ensure_dir(CONFIG.data_root)
 
+    cpu_cores = get_cpu_logical_cores()
+    recommended_threads = cpu_cores
+
     if CONFIG.enable_system_monitor:
         usage = get_system_usage()
+        st.sidebar.markdown("### System")
+        st.sidebar.metric("CPU Logical Cores", cpu_cores)
+        st.sidebar.metric("Recommended Threads", recommended_threads)
         if usage:
             cpu, mem = usage
-            st.sidebar.metric("CPU", f"{cpu:.1f}%")
-            st.sidebar.metric("Memory", f"{mem:.1f}%")
+            st.sidebar.metric("CPU Usage", f"{cpu:.1f}%")
+            st.sidebar.metric("Memory Usage", f"{mem:.1f}%")
         else:
-            st.sidebar.info("psutil 未安裝，略過系統監控。")
+            st.sidebar.info("psutil 未安裝，僅顯示核心數。")
 
     st.subheader("模型檢查")
     status = model_status()
@@ -75,13 +81,23 @@ def main() -> None:
             help="auto=自動判斷；zh=中文；en=英文；ja=日文",
         )
 
+    st.markdown("#### 執行緒設定")
+    st.caption("執行緒數（threads）建議值：與 CPU 核心數相同；設太高不一定更快，可能增加系統負擔。")
+    st.info(f"目前裝置偵測到 **{cpu_cores}** 個邏輯核心，建議 threads 設為 **{recommended_threads}**。")
+
     threads = st.number_input(
         "執行緒數（threads）",
         min_value=1,
-        max_value=32,
-        value=CONFIG.default_threads,
+        max_value=cpu_cores,
+        value=min(CONFIG.default_threads, cpu_cores),
         step=1,
+        help="系統已限制最大值為 CPU 邏輯核心數，避免不合理設定造成效能下降。",
     )
+
+    # 雙重防呆：即使未來 UI 限制變動，仍在程式邏輯再做一次限制
+    threads_used = max(1, min(int(threads), cpu_cores))
+    if threads_used != int(threads):
+        st.warning(f"threads 已自動修正為 {threads_used}（CPU 邏輯核心上限：{cpu_cores}）。")
 
     st.subheader("Current Settings")
     st.code(
@@ -89,7 +105,7 @@ def main() -> None:
             [
                 f"Model: {model_name}",
                 f"Language: {language}",
-                f"Threads: {int(threads)}",
+                f"Threads: {threads_used} / CPU Logical Cores: {cpu_cores}",
                 f"Segment length: {int(segment_minutes)} minutes",
             ]
         ),
@@ -114,7 +130,6 @@ def main() -> None:
         st.error(msg)
         return
 
-    # 安全處理檔名，避免路徑穿越
     safe_name = Path(uploaded.name).name
     upload_dir = ensure_dir(Path(output_root_input) / "_uploads")
     input_path = upload_dir / safe_name
@@ -141,13 +156,13 @@ def main() -> None:
         input_m4a=input_path,
         model_name=model_name,
         language=language,
-        threads=int(threads),
+        threads=threads_used,
         segment_minutes=int(segment_minutes),
         keep_intermediate=keep_intermediate,
         progress_cb=on_progress,
         log_cb=on_log,
     )
-    elapsed = time.perf_counter() - start_perf
+    processing_time_seconds = time.perf_counter() - start_perf
 
     if result.log_file:
         st.subheader("執行 Log（檔案尾端）")
@@ -157,27 +172,46 @@ def main() -> None:
         st.error(result.message)
         return
 
+    audio_duration_seconds = result.audio_duration_seconds
+    rtf = (processing_time_seconds / audio_duration_seconds) if audio_duration_seconds > 0 else 0.0
+
     history = HistoryStore()
     if result.output_directory:
         history.add_record(
             filename=safe_name,
-            audio_duration=result.audio_duration_seconds,
+            audio_duration_seconds=audio_duration_seconds,
             model=model_name,
             language=language,
-            threads=int(threads),
-            processing_time=elapsed,
+            threads_used=threads_used,
+            processing_time_seconds=processing_time_seconds,
+            rtf=rtf,
+            cpu_logical_cores=cpu_cores,
             output_directory=result.output_directory,
         )
 
-    st.success("Processing completed")
+    st.success("轉錄完成")
+
+    metric1, metric2, metric3 = st.columns(3)
+    metric1.metric("音檔長度", format_seconds(audio_duration_seconds))
+    metric2.metric("處理時間", format_seconds(processing_time_seconds))
+    metric3.metric("RTF", f"{rtf:.2f}x")
+
+    if rtf < 1:
+        st.info("RTF < 1：轉錄速度比即時播放更快。")
+    elif rtf > 1:
+        st.warning("RTF > 1：轉錄速度比即時播放慢。")
+    else:
+        st.info("RTF = 1：轉錄速度約等於即時播放。")
+
     st.markdown(
         "\n".join(
             [
-                f"Audio length: {format_seconds(result.audio_duration_seconds)}  ",
+                f"Audio length: {format_seconds(audio_duration_seconds)}  ",
+                f"Processing time: {format_seconds(processing_time_seconds)}  ",
+                f"RTF: {rtf:.2f}x  ",
                 f"Model used: {model_name}  ",
                 f"Language: {language}  ",
-                f"Threads: {int(threads)}  ",
-                f"Processing time: {format_seconds(elapsed)}",
+                f"Threads: {threads_used} / CPU Logical Cores: {cpu_cores}",
             ]
         )
     )
