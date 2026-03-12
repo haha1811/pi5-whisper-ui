@@ -4,26 +4,26 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 
 def ensure_dir(path: Path) -> Path:
-    """確保資料夾存在。"""
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def make_job_dir(output_root: Path, original_name: str) -> Path:
-    """建立任務專屬目錄。"""
+    """建立任務專屬目錄，避免同秒啟動衝突。"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_stem = Path(original_name).stem.replace(" ", "_")
-    return ensure_dir(output_root / f"{safe_stem}_{timestamp}")
+    unique = uuid.uuid4().hex[:6]
+    return ensure_dir(output_root / f"{safe_stem}_{timestamp}_{unique}")
 
 
 def setup_logger(log_file: Path) -> logging.Logger:
-    """設定 logger（寫檔）。"""
     logger_name = f"pi5_whisper_ui_{log_file.stem}"
     logger = logging.getLogger(logger_name)
     logger.setLevel(logging.INFO)
@@ -40,7 +40,6 @@ def setup_logger(log_file: Path) -> logging.Logger:
 
 
 def read_log_tail(log_file: Path, max_lines: int = 200) -> str:
-    """讀取 log 末端內容。"""
     if not log_file.exists():
         return "尚未產生 log。"
     lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -54,7 +53,6 @@ def run_command(
     cwd: Path | None = None,
     on_output: Optional[Callable[[str], None]] = None,
 ) -> Tuple[bool, str]:
-    """執行外部指令（串流 log）。"""
     logger.info("開始步驟：%s", step_name)
     logger.info("執行指令：%s", " ".join(cmd))
 
@@ -89,3 +87,31 @@ def run_command(
     msg = f"{step_name} 完成"
     logger.info(msg)
     return True, msg
+
+
+def format_seconds(seconds: float) -> str:
+    total = int(max(0, round(seconds)))
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {sec}s"
+    return f"{minutes}m {sec}s"
+
+
+def get_dir_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for p in path.rglob("*"):
+        if p.is_file():
+            total += p.stat().st_size
+    return total
+
+
+def format_bytes(num: int) -> str:
+    size = float(num)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{num} B"

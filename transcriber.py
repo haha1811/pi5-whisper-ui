@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -21,6 +22,8 @@ class TranscriptionResult:
     message: str
     final_txt_path: Optional[Path] = None
     log_file: Optional[Path] = None
+    output_directory: Optional[Path] = None
+    audio_duration_seconds: float = 0.0
 
 
 class TranscriptionPipeline:
@@ -53,6 +56,15 @@ class TranscriptionPipeline:
         return True, f"語言設定：{language}"
 
     @staticmethod
+    def get_wav_duration_seconds(wav_path: Path) -> float:
+        with wave.open(str(wav_path), "rb") as wav_file:
+            frames = wav_file.getnframes()
+            rate = wav_file.getframerate()
+            if rate <= 0:
+                return 0.0
+            return frames / float(rate)
+
+    @staticmethod
     def build_whisper_command(
         whisper_bin: Path,
         model_name: str,
@@ -74,7 +86,6 @@ class TranscriptionPipeline:
             "-t",
             str(max(1, threads)),
         ]
-        # auto: 不指定 -l，讓 whisper 自動判斷語言。
         if language != "auto":
             cmd.extend(["-l", language])
         return cmd
@@ -93,6 +104,7 @@ class TranscriptionPipeline:
         job_dir = make_job_dir(self.output_root, input_m4a.name)
         log_file = self.log_root / f"{job_dir.name}.log"
         logger = setup_logger(log_file)
+        audio_duration_seconds = 0.0
 
         def update(step: str, pct: int) -> None:
             logger.info("進度 %s%%：%s", pct, step)
@@ -105,23 +117,19 @@ class TranscriptionPipeline:
             model_ok, model_msg = self.check_model_exists(model_name)
             if not model_ok:
                 logger.error(model_msg)
-                return TranscriptionResult(False, model_msg, log_file=log_file)
+                return TranscriptionResult(False, model_msg, log_file=log_file, output_directory=job_dir)
 
             lang_ok, lang_msg = self.check_language(language)
             if not lang_ok:
                 logger.error(lang_msg)
-                return TranscriptionResult(False, lang_msg, log_file=log_file)
+                return TranscriptionResult(False, lang_msg, log_file=log_file, output_directory=job_dir)
 
             whisper_bin = self.get_whisper_binary()
             if whisper_bin is None:
                 candidates = "\n".join(str(path) for path in WHISPER_CANDIDATES)
-                msg = (
-                    "找不到可執行的 whisper.cpp 執行檔。\n"
-                    "已檢查以下候選路徑（依優先順序）：\n"
-                    f"{candidates}"
-                )
+                msg = "找不到可執行的 whisper.cpp 執行檔。\n已檢查以下候選路徑（依優先順序）：\n" + candidates
                 logger.error(msg)
-                return TranscriptionResult(False, msg, log_file=log_file)
+                return TranscriptionResult(False, msg, log_file=log_file, output_directory=job_dir)
 
             logger.info("使用語言：%s", language)
             logger.info("使用執行緒：%s", max(1, threads))
@@ -149,7 +157,10 @@ class TranscriptionPipeline:
                 on_output=log_cb,
             )
             if not ok:
-                return TranscriptionResult(False, msg, log_file=log_file)
+                return TranscriptionResult(False, msg, log_file=log_file, output_directory=job_dir)
+
+            audio_duration_seconds = self.get_wav_duration_seconds(full_wav)
+            logger.info("音檔長度（秒）：%.2f", audio_duration_seconds)
 
             update("將 wav 依時間切段", 35)
             segments_dir = ensure_dir(job_dir / "segments")
@@ -174,13 +185,13 @@ class TranscriptionPipeline:
                 on_output=log_cb,
             )
             if not ok:
-                return TranscriptionResult(False, msg, log_file=log_file)
+                return TranscriptionResult(False, msg, log_file=log_file, output_directory=job_dir)
 
             segment_files = sorted(segments_dir.glob("segment_*.wav"))
             if not segment_files:
                 msg = "切段後找不到任何 segment_*.wav，流程中止。"
                 logger.error(msg)
-                return TranscriptionResult(False, msg, log_file=log_file)
+                return TranscriptionResult(False, msg, log_file=log_file, output_directory=job_dir)
 
             update("逐段呼叫 whisper.cpp", 55)
             transcripts_dir = ensure_dir(job_dir / "transcripts")
@@ -189,15 +200,8 @@ class TranscriptionPipeline:
             for idx, seg in enumerate(segment_files, start=1):
                 seg_txt_prefix = transcripts_dir / seg.stem
                 seg_progress = 55 + int((idx / len(segment_files)) * 35)
-                cmd = self.build_whisper_command(
-                    whisper_bin=whisper_bin,
-                    model_name=model_name,
-                    seg=seg,
-                    seg_txt_prefix=seg_txt_prefix,
-                    language=language,
-                    threads=threads,
-                )
-                update(f"轉寫第 {idx}/{len(segment_files)} 段：{seg.name}", seg_progress)
+                cmd = self.build_whisper_command(whisper_bin, model_name, seg, seg_txt_prefix, language, threads)
+                update(f"Segment {idx} / {len(segment_files)}", seg_progress)
                 update(f"whisper-cli 指令：{' '.join(cmd)}", seg_progress)
 
                 ok, msg = run_command(
@@ -208,13 +212,13 @@ class TranscriptionPipeline:
                     on_output=log_cb,
                 )
                 if not ok:
-                    return TranscriptionResult(False, msg, log_file=log_file)
+                    return TranscriptionResult(False, msg, log_file=log_file, output_directory=job_dir)
 
                 txt_file = seg_txt_prefix.with_suffix(".txt")
                 if not txt_file.exists():
                     msg = f"轉寫完成但找不到輸出：{txt_file}"
                     logger.error(msg)
-                    return TranscriptionResult(False, msg, log_file=log_file)
+                    return TranscriptionResult(False, msg, log_file=log_file, output_directory=job_dir)
 
                 text = txt_file.read_text(encoding="utf-8", errors="ignore").strip()
                 final_pieces.append(f"===== {seg.name} =====\n{text}\n")
@@ -233,11 +237,24 @@ class TranscriptionPipeline:
                     shutil.rmtree(transcripts_dir, ignore_errors=True)
 
             update("完成", 100)
-            return TranscriptionResult(True, "轉寫完成", final_txt_path=final_txt, log_file=log_file)
+            return TranscriptionResult(
+                True,
+                "轉寫完成",
+                final_txt_path=final_txt,
+                log_file=log_file,
+                output_directory=job_dir,
+                audio_duration_seconds=audio_duration_seconds,
+            )
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("流程發生未預期錯誤：%s", exc)
-            return TranscriptionResult(False, f"流程發生未預期錯誤：{exc}", log_file=log_file)
+            return TranscriptionResult(
+                False,
+                f"流程發生未預期錯誤：{exc}",
+                log_file=log_file,
+                output_directory=job_dir,
+                audio_duration_seconds=audio_duration_seconds,
+            )
 
 
 def model_status() -> Dict[str, bool]:
