@@ -23,6 +23,7 @@ class AppConfig:
     log_root: Path = Path("/mnt/ssd/workspace/pi5-whisper-ui/logs")
     data_root: Path = Path("/mnt/ssd/workspace/pi5-whisper-ui/data")
     history_db_path: Path = Path("/mnt/ssd/workspace/pi5-whisper-ui/data/history.db")
+    current_job_state_path: Path = Path("/mnt/ssd/workspace/pi5-whisper-ui/data/current_job.json")
 
     # 轉寫預設
     default_segment_minutes: int = 15
@@ -32,6 +33,7 @@ class AppConfig:
 
     # 系統監控
     enable_system_monitor: bool = True
+    stale_running_job_seconds: int = 900
 
 
 CONFIG = AppConfig()

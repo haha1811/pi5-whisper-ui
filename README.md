@@ -30,6 +30,7 @@ pi5-whisper-ui/
 - 動態顯示 Current Settings（選項一改就更新）
 - 顯示目前 step、segment 進度與即時 log
 - Sidebar System Monitor 每 60 秒自動更新 CPU/Memory，並顯示 Last updated 時間
+- 任務狀態持久化：切換到其他頁面再回來，可恢復顯示進度、步驟、segment 與 log
 - 完成後顯示音檔長度、處理時間、RTF
 - Admin 頁面可查看歷史、刪除紀錄、刪除輸出資料夾、批次清理舊任務
 
@@ -117,3 +118,11 @@ sudo systemctl stop pi5-whisper-ui.service
 - 請先確認 `deploy/systemd/pi5-whisper-ui.service` 的 `User` / `Group` 是否已改成你的帳號。
 - 上傳檔名已做安全處理（僅取 basename，避免路徑穿越）。
 - 任務資料夾名稱加入 UUID，避免同秒啟動時發生碰撞。
+
+
+## 任務狀態恢復
+
+- 目前任務狀態會同步寫入：`/mnt/ssd/workspace/pi5-whisper-ui/data/current_job.json`。
+- 若切換到其他 Streamlit 頁面再回主頁，會先讀取 `session_state`，必要時再從 `current_job.json` 恢復。
+- 狀態包含：`status/progress/current_step/current_segment/log_path/start_time/end_time`。
+- 若偵測到長時間無更新的 `running` 狀態，會自動標記為 `interrupted`，避免畫面永遠卡住。
