@@ -1,0 +1,35 @@
+[Unit]
+Description=Pi5 Whisper UI (Streamlit)
+Wants=network-online.target
+After=network-online.target mnt-ssd.mount
+RequiresMountsFor=/mnt/ssd/workspace/pi5-whisper-ui /mnt/ssd/tools/whisper.cpp
+
+[Service]
+Type=simple
+# 請改成你要執行服務的使用者（例如 haha）
+User=haha
+Group=haha
+WorkingDirectory=/mnt/ssd/workspace/pi5-whisper-ui
+
+# 可選：覆蓋 Streamlit 及 Python 行為
+Environment=PYTHONUNBUFFERED=1
+Environment=STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+Environment=STREAMLIT_SERVER_HEADLESS=true
+
+ExecStart=/mnt/ssd/workspace/pi5-whisper-ui/.venv/bin/python -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+
+# 重啟策略：異常才重啟，避免無限快速重啟
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 給稍長啟動時間，避免 SSD 剛掛載或首次啟動被誤判
+TimeoutStartSec=60
+
+# 使用 journald 管理輸出
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
