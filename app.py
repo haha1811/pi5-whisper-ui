@@ -9,9 +9,15 @@ import streamlit as st
 
 from config import CONFIG, LANGUAGE_OPTIONS, MODEL_PATHS
 from history import HistoryStore
-from monitor import get_cpu_logical_cores, get_system_usage
+from monitor import get_cpu_logical_cores, get_system_usage_with_timestamp
 from transcriber import TranscriptionPipeline, model_status
 from utils import ensure_dir, format_seconds, read_log_tail
+
+try:
+    # 可選套件：讓頁面每 60 秒自動 rerun，更新 sidebar 監控數值。
+    from streamlit_autorefresh import st_autorefresh
+except Exception:  # noqa: BLE001
+    st_autorefresh = None
 
 
 MODEL_DESCRIPTIONS = {
@@ -19,6 +25,8 @@ MODEL_DESCRIPTIONS = {
     "medium": "速度與品質平衡",
     "large-v3-turbo": "品質較高，但在 Raspberry Pi 5 上執行時間較長、資源需求較高",
 }
+
+MONITOR_REFRESH_SECONDS = 60
 
 
 def main() -> None:
@@ -30,20 +38,54 @@ def main() -> None:
     ensure_dir(CONFIG.log_root)
     ensure_dir(CONFIG.data_root)
 
+    # 若有可用套件，使用輕量自動刷新（60 秒）更新監控資訊。
+    # Streamlit 在長任務期間不會中斷執行，重繪會在安全時機發生。
+    if st_autorefresh is not None:
+        st_autorefresh(interval=MONITOR_REFRESH_SECONDS * 1000, key="system_monitor_autorefresh")
+
     cpu_cores = get_cpu_logical_cores()
     recommended_threads = cpu_cores
 
-    if CONFIG.enable_system_monitor:
-        usage = get_system_usage()
-        st.sidebar.markdown("### System")
-        st.sidebar.metric("CPU Logical Cores", cpu_cores)
-        st.sidebar.metric("Recommended Threads", recommended_threads)
+    # sidebar 監控區塊：使用 placeholders，避免整個頁面大幅閃動。
+    st.sidebar.markdown("### System")
+    cores_placeholder = st.sidebar.empty()
+    reco_placeholder = st.sidebar.empty()
+    cpu_placeholder = st.sidebar.empty()
+    mem_placeholder = st.sidebar.empty()
+    updated_placeholder = st.sidebar.empty()
+
+    cores_placeholder.metric("CPU Logical Cores", cpu_cores)
+    reco_placeholder.metric("Recommended Threads", recommended_threads)
+
+    if "last_monitor_refresh_at" not in st.session_state:
+        st.session_state.last_monitor_refresh_at = 0.0
+
+    def refresh_monitor(force: bool = False) -> None:
+        """刷新 sidebar 監控數值。
+
+        - force=True：強制更新（例如初始化）
+        - force=False：最多每 60 秒更新一次（避免頻繁重繪）
+        """
+        now = time.time()
+        last = float(st.session_state.get("last_monitor_refresh_at", 0.0))
+        if (not force) and (now - last < MONITOR_REFRESH_SECONDS):
+            return
+
+        usage = get_system_usage_with_timestamp()
         if usage:
-            cpu, mem = usage
-            st.sidebar.metric("CPU Usage", f"{cpu:.1f}%")
-            st.sidebar.metric("Memory Usage", f"{mem:.1f}%")
+            cpu, mem, ts = usage
+            cpu_placeholder.metric("CPU Usage", f"{cpu:.1f}%")
+            mem_placeholder.metric("Memory Usage", f"{mem:.1f}%")
+            updated_placeholder.caption(f"Last updated: {ts}")
         else:
-            st.sidebar.info("psutil 未安裝，僅顯示核心數。")
+            cpu_placeholder.info("psutil 未安裝，略過 CPU/Memory 監控。")
+            mem_placeholder.empty()
+            updated_placeholder.empty()
+
+        st.session_state.last_monitor_refresh_at = now
+
+    if CONFIG.enable_system_monitor:
+        refresh_monitor(force=True)
 
     st.subheader("模型檢查")
     status = model_status()
@@ -94,7 +136,6 @@ def main() -> None:
         help="系統已限制最大值為 CPU 邏輯核心數，避免不合理設定造成效能下降。",
     )
 
-    # 雙重防呆：即使未來 UI 限制變動，仍在程式邏輯再做一次限制
     threads_used = max(1, min(int(threads), cpu_cores))
     if threads_used != int(threads):
         st.warning(f"threads 已自動修正為 {threads_used}（CPU 邏輯核心上限：{cpu_cores}）。")
@@ -150,6 +191,9 @@ def main() -> None:
     def on_log(line: str) -> None:
         live_log_lines.append(line)
         live_log_placeholder.code("\n".join(live_log_lines[-120:]), language="log")
+        # 轉寫期間也嘗試按節流規則更新 sidebar 監控。
+        if CONFIG.enable_system_monitor:
+            refresh_monitor(force=False)
 
     start_perf = time.perf_counter()
     result = pipeline.run(

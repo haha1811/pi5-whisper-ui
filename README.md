@@ -29,6 +29,7 @@ pi5-whisper-ui/
 - threads 硬體感知：依 CPU 邏輯核心數限制最大值
 - 動態顯示 Current Settings（選項一改就更新）
 - 顯示目前 step、segment 進度與即時 log
+- Sidebar System Monitor 每 60 秒自動更新 CPU/Memory，並顯示 Last updated 時間
 - 完成後顯示音檔長度、處理時間、RTF
 - Admin 頁面可查看歷史、刪除紀錄、刪除輸出資料夾、批次清理舊任務
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Optional, Tuple
 
 
@@ -31,3 +32,12 @@ def get_system_usage() -> Optional[Tuple[float, float]]:
     cpu = psutil.cpu_percent(interval=0.2)
     mem = psutil.virtual_memory().percent
     return cpu, mem
+
+
+def get_system_usage_with_timestamp() -> Optional[Tuple[float, float, str]]:
+    """回傳 (cpu_percent, memory_percent, HH:MM:SS)。"""
+    usage = get_system_usage()
+    if usage is None:
+        return None
+    cpu, mem = usage
+    return cpu, mem, datetime.now().strftime("%H:%M:%S")
