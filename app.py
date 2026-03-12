@@ -29,7 +29,8 @@ MODEL_DESCRIPTIONS = {
     "large-v3-turbo": "品質較高，但在 Raspberry Pi 5 上執行時間較長、資源需求較高",
 }
 
-MONITOR_REFRESH_SECONDS = 60
+# 依需求改為 2 秒刷新一次（停留頁面也會更新）
+UI_REFRESH_SECONDS = 2
 
 
 def parse_segment(step: str) -> str:
@@ -39,7 +40,7 @@ def parse_segment(step: str) -> str:
 
 
 def render_job_state(state: Dict[str, Any]) -> None:
-    """將目前任務狀態顯示在 UI。"""
+    """顯示目前任務狀態（每次 rerun 都重新讀取最新狀態）。"""
     status = state.get("status", "idle")
     job_id = state.get("job_id", "-")
     start_time = state.get("start_time", "-")
@@ -53,6 +54,7 @@ def render_job_state(state: Dict[str, Any]) -> None:
                 f"Status: {status}",
                 f"Start time: {start_time}",
                 f"Last updated: {last_updated}",
+                f"UI refreshed at: {datetime.now().strftime('%H:%M:%S')}",
             ]
         ),
         language="text",
@@ -69,7 +71,7 @@ def render_job_state(state: Dict[str, Any]) -> None:
 
     log_path = state.get("log_path")
     if log_path:
-        st.subheader("目前 Log")
+        st.subheader("目前 Log（每次自動刷新重讀最後幾行）")
         st.code(read_log_tail(Path(log_path)), language="log")
 
     if status == "completed":
@@ -93,6 +95,11 @@ def render_job_state(state: Dict[str, Any]) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Pi5 Whisper 逐字稿工具", page_icon="🎙️", layout="wide")
+
+    # 每 2 秒自動刷新，讓停留畫面也能看到最新數值
+    if st_autorefresh is not None:
+        st_autorefresh(interval=UI_REFRESH_SECONDS * 1000, key="ui_autorefresh_2s")
+
     st.title("🎙️ Raspberry Pi 5 本機逐字稿工具")
     st.caption("上傳 m4a 後，自動完成轉檔、切段、whisper.cpp 轉寫與合併。")
 
@@ -103,57 +110,26 @@ def main() -> None:
     state_store = JobStateStore(CONFIG.current_job_state_path)
     disk_state = state_store.mark_interrupted_if_stale(CONFIG.stale_running_job_seconds)
 
-    # 優先使用 session_state，若不存在則回復磁碟狀態
-    if "current_job_state" not in st.session_state and disk_state:
+    # 每次 rerun 都以磁碟最新狀態為主（若存在）
+    if disk_state:
         st.session_state.current_job_state = disk_state
-    elif "current_job_state" in st.session_state and disk_state:
-        # 避免 session_state 與磁碟不一致，採用較新的 last_updated
-        ss_state = st.session_state.current_job_state
-        ss_ts = ss_state.get("last_updated", "")
-        disk_ts = disk_state.get("last_updated", "")
-        if disk_ts > ss_ts:
-            st.session_state.current_job_state = disk_state
-
-    if st_autorefresh is not None:
-        st_autorefresh(interval=MONITOR_REFRESH_SECONDS * 1000, key="system_monitor_autorefresh")
 
     cpu_cores = get_cpu_logical_cores()
     recommended_threads = cpu_cores
 
+    # Sidebar System 監控（每次 rerun 更新，搭配 2 秒 autorefresh）
     st.sidebar.markdown("### System")
-    cores_placeholder = st.sidebar.empty()
-    reco_placeholder = st.sidebar.empty()
-    cpu_placeholder = st.sidebar.empty()
-    mem_placeholder = st.sidebar.empty()
-    updated_placeholder = st.sidebar.empty()
+    st.sidebar.metric("CPU Logical Cores", cpu_cores)
+    st.sidebar.metric("Recommended Threads", recommended_threads)
 
-    cores_placeholder.metric("CPU Logical Cores", cpu_cores)
-    reco_placeholder.metric("Recommended Threads", recommended_threads)
-
-    if "last_monitor_refresh_at" not in st.session_state:
-        st.session_state.last_monitor_refresh_at = 0.0
-
-    def refresh_monitor(force: bool = False) -> None:
-        now = time.time()
-        last = float(st.session_state.get("last_monitor_refresh_at", 0.0))
-        if (not force) and (now - last < MONITOR_REFRESH_SECONDS):
-            return
-
-        usage = get_system_usage_with_timestamp()
-        if usage:
-            cpu, mem, ts = usage
-            cpu_placeholder.metric("CPU Usage", f"{cpu:.1f}%")
-            mem_placeholder.metric("Memory Usage", f"{mem:.1f}%")
-            updated_placeholder.caption(f"Last updated: {ts}")
-        else:
-            cpu_placeholder.info("psutil 未安裝，略過 CPU/Memory 監控。")
-            mem_placeholder.empty()
-            updated_placeholder.empty()
-
-        st.session_state.last_monitor_refresh_at = now
-
-    if CONFIG.enable_system_monitor:
-        refresh_monitor(force=True)
+    usage = get_system_usage_with_timestamp()
+    if usage:
+        cpu, mem, ts = usage
+        st.sidebar.metric("CPU Usage", f"{cpu:.1f}%")
+        st.sidebar.metric("Memory Usage", f"{mem:.1f}%")
+        st.sidebar.caption(f"Last updated: {ts}")
+    else:
+        st.sidebar.info("psutil 未安裝，略過 CPU/Memory 監控。")
 
     current_state = st.session_state.get("current_job_state")
     if current_state and current_state.get("status") == "running":
@@ -170,10 +146,11 @@ def main() -> None:
 
     st.divider()
 
-    # 若有任務狀態，先顯示恢復畫面
     if current_state:
         render_job_state(current_state)
         st.divider()
+    else:
+        st.info("目前無執行中的任務。")
 
     uploaded = st.file_uploader("上傳 m4a 錄音檔", type=["m4a"])
 
@@ -199,7 +176,6 @@ def main() -> None:
     keep_intermediate = st.checkbox("保留中間檔（wav、分段 wav、分段 txt）", value=False)
     output_root_input = st.text_input("輸出目錄", value=str(CONFIG.output_root))
 
-    # 有 running 任務時避免重複啟動
     disable_start = bool(current_state and current_state.get("status") == "running")
     if disable_start:
         st.warning("目前已有任務執行中，請等待完成後再啟動新任務。")
@@ -268,8 +244,6 @@ def main() -> None:
     def on_log(line: str) -> None:
         live_log_lines.append(line)
         live_log_placeholder.code("\n".join(live_log_lines[-120:]), language="log")
-        if CONFIG.enable_system_monitor:
-            refresh_monitor(force=False)
 
     start_perf = time.perf_counter()
     result = pipeline.run(
