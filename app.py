@@ -170,7 +170,10 @@ def main() -> None:
     status = model_status()
     for model_name in ["small", "medium", "large-v3-turbo"]:
         model_path = MODEL_PATHS[model_name]
-        st.success(f"{model_name}: ✅ {model_path}") if status[model_name] else st.error(f"{model_name}: ❌ 缺少模型檔 {model_path}")
+        if status[model_name]:
+            st.success(f"{model_name}: ✅ {model_path}")
+        else:
+            st.error(f"{model_name}: ❌ 缺少模型檔 {model_path}")
 
     st.divider()
     if current_state:
