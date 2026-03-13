@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -32,9 +33,24 @@ class JobStateStore:
     def now_iso() -> str:
         return datetime.now().isoformat(timespec="seconds")
 
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
     def mark_interrupted_if_stale(self, stale_seconds: int) -> Optional[Dict[str, Any]]:
         state = self.load()
         if not state or state.get("status") != "running":
+            return state
+
+        # 若目前仍有活著的 subprocess，不要標記 interrupted
+        pid = int(state.get("current_pid") or 0)
+        if self._pid_alive(pid):
             return state
 
         last_updated = state.get("last_updated")

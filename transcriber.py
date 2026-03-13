@@ -14,6 +14,7 @@ from utils import ensure_dir, make_job_dir, run_command, setup_logger
 
 ProgressCallback = Callable[[str, int], None]
 LogCallback = Callable[[str], None]
+HeartbeatCallback = Callable[[str, int], None]
 
 
 @dataclass
@@ -100,6 +101,7 @@ class TranscriptionPipeline:
         keep_intermediate: bool,
         progress_cb: Optional[ProgressCallback] = None,
         log_cb: Optional[LogCallback] = None,
+        heartbeat_cb: Optional[HeartbeatCallback] = None,
     ) -> TranscriptionResult:
         job_dir = make_job_dir(self.output_root, input_m4a.name)
         log_file = self.log_root / f"{job_dir.name}.log"
@@ -110,6 +112,17 @@ class TranscriptionPipeline:
             logger.info("進度 %s%%：%s", pct, step)
             if progress_cb:
                 progress_cb(step, pct)
+
+        def run_step(cmd: List[str], step_name: str, cwd: Path | None = None) -> tuple[bool, str]:
+            return run_command(
+                cmd,
+                logger,
+                step_name,
+                cwd=cwd,
+                on_output=log_cb,
+                on_start=(lambda pid: heartbeat_cb(step_name, pid) if heartbeat_cb else None),
+                on_heartbeat=(lambda: heartbeat_cb(step_name, 0) if heartbeat_cb else None),
+            )
 
         try:
             update("初始化工作目錄", 5)
@@ -140,21 +153,9 @@ class TranscriptionPipeline:
             shutil.copy2(input_m4a, source_m4a)
 
             full_wav = job_dir / "full.wav"
-            ok, msg = run_command(
-                [
-                    CONFIG.ffmpeg_binary,
-                    "-y",
-                    "-i",
-                    str(source_m4a),
-                    "-ar",
-                    "16000",
-                    "-ac",
-                    "1",
-                    str(full_wav),
-                ],
-                logger,
+            ok, msg = run_step(
+                [CONFIG.ffmpeg_binary, "-y", "-i", str(source_m4a), "-ar", "16000", "-ac", "1", str(full_wav)],
                 "m4a 轉 wav",
-                on_output=log_cb,
             )
             if not ok:
                 return TranscriptionResult(False, msg, log_file=log_file, output_directory=job_dir)
@@ -166,23 +167,9 @@ class TranscriptionPipeline:
             segments_dir = ensure_dir(job_dir / "segments")
             segment_seconds = max(60, segment_minutes * 60)
             segment_pattern = segments_dir / "segment_%03d.wav"
-            ok, msg = run_command(
-                [
-                    CONFIG.ffmpeg_binary,
-                    "-y",
-                    "-i",
-                    str(full_wav),
-                    "-f",
-                    "segment",
-                    "-segment_time",
-                    str(segment_seconds),
-                    "-c",
-                    "copy",
-                    str(segment_pattern),
-                ],
-                logger,
+            ok, msg = run_step(
+                [CONFIG.ffmpeg_binary, "-y", "-i", str(full_wav), "-f", "segment", "-segment_time", str(segment_seconds), "-c", "copy", str(segment_pattern)],
                 "wav 切段",
-                on_output=log_cb,
             )
             if not ok:
                 return TranscriptionResult(False, msg, log_file=log_file, output_directory=job_dir)
@@ -204,13 +191,7 @@ class TranscriptionPipeline:
                 update(f"Segment {idx} / {len(segment_files)}", seg_progress)
                 update(f"whisper-cli 指令：{' '.join(cmd)}", seg_progress)
 
-                ok, msg = run_command(
-                    cmd,
-                    logger,
-                    f"whisper 轉寫 {seg.name}",
-                    cwd=CONFIG.whisper_cpp_root,
-                    on_output=log_cb,
-                )
+                ok, msg = run_step(cmd, f"whisper 轉寫 {seg.name}", cwd=CONFIG.whisper_cpp_root)
                 if not ok:
                     return TranscriptionResult(False, msg, log_file=log_file, output_directory=job_dir)
 
@@ -237,24 +218,11 @@ class TranscriptionPipeline:
                     shutil.rmtree(transcripts_dir, ignore_errors=True)
 
             update("完成", 100)
-            return TranscriptionResult(
-                True,
-                "轉寫完成",
-                final_txt_path=final_txt,
-                log_file=log_file,
-                output_directory=job_dir,
-                audio_duration_seconds=audio_duration_seconds,
-            )
+            return TranscriptionResult(True, "轉寫完成", final_txt_path=final_txt, log_file=log_file, output_directory=job_dir, audio_duration_seconds=audio_duration_seconds)
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("流程發生未預期錯誤：%s", exc)
-            return TranscriptionResult(
-                False,
-                f"流程發生未預期錯誤：{exc}",
-                log_file=log_file,
-                output_directory=job_dir,
-                audio_duration_seconds=audio_duration_seconds,
-            )
+            return TranscriptionResult(False, f"流程發生未預期錯誤：{exc}", log_file=log_file, output_directory=job_dir, audio_duration_seconds=audio_duration_seconds)
 
 
 def model_status() -> Dict[str, bool]:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -52,7 +54,11 @@ def run_command(
     step_name: str,
     cwd: Path | None = None,
     on_output: Optional[Callable[[str], None]] = None,
+    on_start: Optional[Callable[[int], None]] = None,
+    on_heartbeat: Optional[Callable[[], None]] = None,
+    heartbeat_interval_sec: float = 2.0,
 ) -> Tuple[bool, str]:
+    """執行外部指令，支援輸出串流與 heartbeat。"""
     logger.info("開始步驟：%s", step_name)
     logger.info("執行指令：%s", " ".join(cmd))
 
@@ -70,13 +76,31 @@ def run_command(
         logger.exception(msg)
         return False, msg
 
-    assert process.stdout is not None
-    for raw_line in process.stdout:
-        line = raw_line.rstrip("\n")
-        if line:
-            logger.info("%s output: %s", step_name, line)
-            if on_output:
-                on_output(line)
+    if on_start:
+        on_start(process.pid)
+
+    stop_flag = threading.Event()
+
+    def heartbeat_worker() -> None:
+        while not stop_flag.is_set():
+            if on_heartbeat:
+                on_heartbeat()
+            stop_flag.wait(max(0.5, heartbeat_interval_sec))
+
+    hb_thread = threading.Thread(target=heartbeat_worker, daemon=True)
+    hb_thread.start()
+
+    try:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip("\n")
+            if line:
+                logger.info("%s output: %s", step_name, line)
+                if on_output:
+                    on_output(line)
+    finally:
+        stop_flag.set()
+        hb_thread.join(timeout=1.0)
 
     return_code = process.wait()
     if return_code != 0:
