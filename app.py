@@ -56,7 +56,26 @@ def try_recover_final_transcript(output_path: Path) -> Path | None:
     return final_txt
 
 
-def render_job_state(state: Dict[str, Any], state_store: JobStateStore) -> None:
+def pick_main_state(disk_state: Dict[str, Any] | None) -> tuple[Dict[str, Any] | None, str]:
+    """首頁主狀態選擇規則：running 優先，否則 latest。"""
+    state = st.session_state.get("current_job_state")
+
+    # 磁碟有更新就覆蓋 session，確保切頁回來是最新。
+    if disk_state:
+        if (not state) or (disk_state.get("last_updated", "") >= state.get("last_updated", "")):
+            state = disk_state
+            st.session_state.current_job_state = state
+
+    if not state:
+        return None, "none"
+
+    if state.get("status") == "running":
+        return state, "active"
+
+    return state, "latest"
+
+
+def render_job_state(state: Dict[str, Any], state_store: JobStateStore, state_kind: str) -> None:
     """顯示目前任務狀態。"""
     status = state.get("status", "idle")
     job_id = state.get("job_id", "-")
@@ -64,7 +83,11 @@ def render_job_state(state: Dict[str, Any], state_store: JobStateStore) -> None:
     last_updated = state.get("last_updated", "-")
     current_pid = int(state.get("current_pid") or 0)
 
-    st.markdown("### 任務狀態")
+    if state_kind == "active":
+        st.markdown("### Current Active Job")
+    else:
+        st.markdown("### Latest Job")
+
     st.code(
         "\n".join(
             [
@@ -146,8 +169,7 @@ def main() -> None:
 
     state_store = JobStateStore(CONFIG.current_job_state_path)
     disk_state = state_store.mark_interrupted_if_stale(CONFIG.stale_running_job_seconds)
-    if disk_state:
-        st.session_state.current_job_state = disk_state
+    main_state, state_kind = pick_main_state(disk_state)
 
     cpu_cores = get_cpu_logical_cores()
     st.sidebar.markdown("### System")
@@ -162,8 +184,7 @@ def main() -> None:
     else:
         st.sidebar.info("psutil 未安裝，略過 CPU/Memory 監控。")
 
-    current_state = st.session_state.get("current_job_state")
-    if current_state and current_state.get("status") == "running":
+    if main_state and main_state.get("status") == "running":
         st.info("目前有任務正在執行中，可切換頁面後再返回查看，任務不會中斷。")
 
     st.subheader("模型檢查")
@@ -176,11 +197,6 @@ def main() -> None:
             st.error(f"{model_name}: ❌ 缺少模型檔 {model_path}")
 
     st.divider()
-    if current_state:
-        render_job_state(current_state, state_store)
-        st.divider()
-    else:
-        st.info("目前無執行中的任務。")
 
     uploaded = st.file_uploader("上傳 m4a 錄音檔", type=["m4a"])
     col1, col2, col3 = st.columns(3)
@@ -198,11 +214,17 @@ def main() -> None:
     keep_intermediate = st.checkbox("保留中間檔（wav、分段 wav、分段 txt）", value=False)
     output_root_input = st.text_input("輸出目錄", value=str(CONFIG.output_root))
 
-    disable_start = bool(current_state and current_state.get("status") == "running")
+    disable_start = bool(main_state and main_state.get("status") == "running")
     if disable_start:
         st.warning("目前已有任務執行中，請等待完成後再啟動新任務。")
     start = st.button("開始轉寫", type="primary", disabled=disable_start)
+
+    # 只有未按開始時才顯示舊任務主區塊，避免舊/新同屏混淆
     if not start:
+        if main_state:
+            render_job_state(main_state, state_store, state_kind)
+        else:
+            st.info("目前無執行中的任務。")
         return
 
     if uploaded is None:
@@ -240,6 +262,10 @@ def main() -> None:
     st.session_state.current_job_state = running_state
     state_store.save(running_state)
 
+    # 新任務啟動後，僅顯示新任務資訊
+    st.markdown("### Current Active Job")
+    st.caption(f"Job ID: {job_id}")
+
     progress_bar = st.progress(0)
     status_placeholder = st.empty()
     command_placeholder = st.empty()
@@ -266,7 +292,11 @@ def main() -> None:
         update_state(heartbeat_source="log")
 
     def on_heartbeat(step_name: str, pid: int) -> None:
-        update_state(current_step=step_name, current_pid=(pid if pid > 0 else st.session_state.current_job_state.get("current_pid", 0)), heartbeat_source=("process_start" if pid > 0 else "heartbeat"))
+        update_state(
+            current_step=step_name,
+            current_pid=(pid if pid > 0 else st.session_state.current_job_state.get("current_pid", 0)),
+            heartbeat_source=("process_start" if pid > 0 else "heartbeat"),
+        )
 
     start_perf = time.perf_counter()
     result = pipeline.run(
@@ -287,7 +317,14 @@ def main() -> None:
         st.code(read_log_tail(result.log_file), language="log")
 
     if not result.success:
-        update_state(status="failed", end_time=datetime.now().isoformat(timespec="seconds"), current_pid=0, message=result.message, log_path=str(result.log_file) if result.log_file else "", output_path=str(result.output_directory) if result.output_directory else "")
+        update_state(
+            status="failed",
+            end_time=datetime.now().isoformat(timespec="seconds"),
+            current_pid=0,
+            message=result.message,
+            log_path=str(result.log_file) if result.log_file else "",
+            output_path=str(result.output_directory) if result.output_directory else "",
+        )
         st.error(result.message)
         return
 
@@ -311,7 +348,18 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             st.warning(f"使用紀錄寫入失敗：{exc}")
 
-    update_state(status="completed", progress_percent=100, current_step="完成", current_pid=0, end_time=datetime.now().isoformat(timespec="seconds"), log_path=str(result.log_file) if result.log_file else "", output_path=str(result.output_directory) if result.output_directory else "", final_txt_path=str(result.final_txt_path) if result.final_txt_path else "", message="轉寫完成", heartbeat_source="complete")
+    update_state(
+        status="completed",
+        progress_percent=100,
+        current_step="完成",
+        current_pid=0,
+        end_time=datetime.now().isoformat(timespec="seconds"),
+        log_path=str(result.log_file) if result.log_file else "",
+        output_path=str(result.output_directory) if result.output_directory else "",
+        final_txt_path=str(result.final_txt_path) if result.final_txt_path else "",
+        message="轉寫完成",
+        heartbeat_source="complete",
+    )
 
     st.success("轉錄完成")
     m1, m2, m3 = st.columns(3)
