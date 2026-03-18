@@ -1,0 +1,15 @@
+.status-badge {
+  display: inline-block;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+.status-running { background: #DBEAFE; color: #1D4ED8; border-color: #BFDBFE; }
+.status-completed { background: #DCFCE7; color: #166534; border-color: #BBF7D0; }
+.status-failed,
+.status-interrupted { background: #FEE2E2; color: #991B1B; border-color: #FECACA; }
+.status-idle,
+.status-unknown { background: #E2E8F0; color: #334155; border-color: #CBD5E1; }

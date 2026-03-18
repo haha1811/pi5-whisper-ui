@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 from datetime import datetime
+from html import escape
 from pathlib import Path
 from typing import Any, Dict
 
@@ -56,6 +57,31 @@ def try_recover_final_transcript(output_path: Path) -> Path | None:
     return final_txt
 
 
+def load_ui_styles() -> None:
+    """Load minimal custom UI styles with silent fallback."""
+    css_path = Path(__file__).resolve().parent / "assets" / "style.css"
+    try:
+        if css_path.exists():
+            st.markdown(f"<style>{css_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
+    except Exception:  # noqa: BLE001
+        # Silent fallback by design.
+        pass
+
+
+def get_status_badge_html(status: str | None) -> str:
+    """Return status badge HTML with unknown fallback and safe text escaping."""
+    status_value = (status or "unknown").strip().lower() or "unknown"
+    badge_map = {
+        "running": ("Running", "running"),
+        "completed": ("Completed", "completed"),
+        "failed": ("Failed", "failed"),
+        "interrupted": ("Interrupted", "interrupted"),
+        "idle": ("Idle", "idle"),
+    }
+    label, css_suffix = badge_map.get(status_value, (status_value.title(), "unknown"))
+    return f"<span class='status-badge status-{css_suffix}'>{escape(label)}</span>"
+
+
 def pick_main_state(disk_state: Dict[str, Any] | None) -> tuple[Dict[str, Any] | None, str]:
     """首頁主狀態選擇規則：running 優先，否則 latest。"""
     state = st.session_state.get("current_job_state")
@@ -83,24 +109,19 @@ def render_job_state(state: Dict[str, Any], state_store: JobStateStore, state_ki
     last_updated = state.get("last_updated", "-")
     current_pid = int(state.get("current_pid") or 0)
 
-    if state_kind == "active":
-        st.markdown("### Current Active Job")
-    else:
-        st.markdown("### Latest Job")
+    with st.container(border=True):
+        if state_kind == "active":
+            st.markdown("### Current Active Job")
+        else:
+            st.markdown("### Latest Job")
+        st.markdown(get_status_badge_html(status), unsafe_allow_html=True)
 
-    st.code(
-        "\n".join(
-            [
-                f"Job ID: {job_id}",
-                f"Status: {status}",
-                f"Current PID: {current_pid if current_pid > 0 else '-'}",
-                f"Start time: {start_time}",
-                f"Last updated: {last_updated}",
-                f"UI refreshed at: {datetime.now().strftime('%H:%M:%S')}",
-            ]
-        ),
-        language="text",
-    )
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Job ID", job_id)
+        m2.metric("Current PID", str(current_pid if current_pid > 0 else "-"))
+        m3.metric("Start time", start_time)
+        m4.metric("Last updated", last_updated)
+        st.caption(f"UI refreshed at: {datetime.now().strftime('%H:%M:%S')}")
 
     progress = int(state.get("progress_percent", 0))
     current_step = state.get("current_step", "尚未開始")
@@ -137,18 +158,19 @@ def render_job_state(state: Dict[str, Any], state_store: JobStateStore, state_ki
                     st.error("恢復失敗，找不到可合併的 segment txt。")
 
     if status == "completed":
-        st.success(state.get("message", "最近一次任務已完成。"))
-        final_txt_path = state.get("final_txt_path")
-        if final_txt_path and Path(final_txt_path).exists():
-            text = Path(final_txt_path).read_text(encoding="utf-8", errors="ignore")
-            st.subheader("最終逐字稿預覽")
-            st.text_area("內容", value=text, height=300)
-            st.download_button(
-                label="下載最終逐字稿 TXT",
-                data=text.encode("utf-8"),
-                file_name=Path(final_txt_path).name,
-                mime="text/plain",
-            )
+        with st.container(border=True):
+            st.success(state.get("message", "最近一次任務已完成。"))
+            final_txt_path = state.get("final_txt_path")
+            if final_txt_path and Path(final_txt_path).exists():
+                text = Path(final_txt_path).read_text(encoding="utf-8", errors="ignore")
+                st.subheader("最終逐字稿預覽")
+                st.text_area("內容", value=text, height=300)
+                st.download_button(
+                    label="下載最終逐字稿 TXT",
+                    data=text.encode("utf-8"),
+                    file_name=Path(final_txt_path).name,
+                    mime="text/plain",
+                )
     elif status == "failed":
         st.error(state.get("message", "任務失敗"))
     elif status == "interrupted":
@@ -157,6 +179,7 @@ def render_job_state(state: Dict[str, Any], state_store: JobStateStore, state_ki
 
 def main() -> None:
     st.set_page_config(page_title="Pi5 Whisper 逐字稿工具", page_icon="🎙️", layout="wide")
+    load_ui_styles()
     if st_autorefresh is not None:
         st_autorefresh(interval=UI_REFRESH_SECONDS * 1000, key="ui_autorefresh_2s")
 
@@ -184,40 +207,58 @@ def main() -> None:
     else:
         st.sidebar.info("psutil 未安裝，略過 CPU/Memory 監控。")
 
-    if main_state and main_state.get("status") == "running":
-        st.info("目前有任務正在執行中，可切換頁面後再返回查看，任務不會中斷。")
+    header_left, header_right = st.columns([2, 1])
+    with header_left:
+        if main_state and main_state.get("status") == "running":
+            st.info("目前有任務正在執行中，可切換頁面後再返回查看，任務不會中斷。")
+    with header_right:
+        state_label = main_state.get("status") if main_state else "idle"
+        st.markdown("#### 系統狀態")
+        st.markdown(get_status_badge_html(state_label), unsafe_allow_html=True)
 
-    st.subheader("模型檢查")
-    status = model_status()
-    for model_name in ["small", "medium", "large-v3-turbo"]:
-        model_path = MODEL_PATHS[model_name]
-        if status[model_name]:
-            st.success(f"{model_name}: ✅ {model_path}")
-        else:
-            st.error(f"{model_name}: ❌ 缺少模型檔 {model_path}")
+    with st.container(border=True):
+        st.subheader("模型檢查")
+        status = model_status()
+        for model_name in ["small", "medium", "large-v3-turbo"]:
+            model_path = MODEL_PATHS[model_name]
+            if status[model_name]:
+                st.success(f"{model_name}: ✅ {model_path}")
+            else:
+                st.error(f"{model_name}: ❌ 缺少模型檔 {model_path}")
 
-    st.divider()
+    form_col, state_col = st.columns([2, 1])
+    with form_col:
+        with st.container(border=True):
+            uploaded = st.file_uploader("上傳 m4a 錄音檔", type=["m4a"])
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                segment_minutes = st.number_input("分段長度（分鐘）", min_value=1, max_value=120, value=CONFIG.default_segment_minutes, step=1)
+            with col2:
+                model_name = st.selectbox("選擇模型", options=["small", "medium", "large-v3-turbo"], index=["small", "medium", "large-v3-turbo"].index(CONFIG.default_model_name))
+            with col3:
+                language = st.selectbox("辨識語言", options=LANGUAGE_OPTIONS, index=LANGUAGE_OPTIONS.index(CONFIG.default_language))
 
-    uploaded = st.file_uploader("上傳 m4a 錄音檔", type=["m4a"])
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        segment_minutes = st.number_input("分段長度（分鐘）", min_value=1, max_value=120, value=CONFIG.default_segment_minutes, step=1)
-    with col2:
-        model_name = st.selectbox("選擇模型", options=["small", "medium", "large-v3-turbo"], index=["small", "medium", "large-v3-turbo"].index(CONFIG.default_model_name))
-    with col3:
-        language = st.selectbox("辨識語言", options=LANGUAGE_OPTIONS, index=LANGUAGE_OPTIONS.index(CONFIG.default_language))
+            threads = st.number_input("執行緒數（threads）", min_value=1, max_value=cpu_cores, value=min(CONFIG.default_threads, cpu_cores), step=1)
+            threads_used = max(1, min(int(threads), cpu_cores))
+            st.code("\n".join([f"Model: {model_name}", f"Language: {language}", f"Threads: {threads_used}/{cpu_cores}", f"Segment: {int(segment_minutes)} min"]), language="text")
 
-    threads = st.number_input("執行緒數（threads）", min_value=1, max_value=cpu_cores, value=min(CONFIG.default_threads, cpu_cores), step=1)
-    threads_used = max(1, min(int(threads), cpu_cores))
-    st.code("\n".join([f"Model: {model_name}", f"Language: {language}", f"Threads: {threads_used}/{cpu_cores}", f"Segment: {int(segment_minutes)} min"]), language="text")
+            keep_intermediate = st.checkbox("保留中間檔（wav、分段 wav、分段 txt）", value=False)
+            output_root_input = st.text_input("輸出目錄", value=str(CONFIG.output_root))
 
-    keep_intermediate = st.checkbox("保留中間檔（wav、分段 wav、分段 txt）", value=False)
-    output_root_input = st.text_input("輸出目錄", value=str(CONFIG.output_root))
+            disable_start = bool(main_state and main_state.get("status") == "running")
+            if disable_start:
+                st.warning("目前已有任務執行中，請等待完成後再啟動新任務。")
+            start = st.button("開始轉寫", type="primary", disabled=disable_start)
 
-    disable_start = bool(main_state and main_state.get("status") == "running")
-    if disable_start:
-        st.warning("目前已有任務執行中，請等待完成後再啟動新任務。")
-    start = st.button("開始轉寫", type="primary", disabled=disable_start)
+    with state_col:
+        with st.container(border=True):
+            st.markdown("#### 執行摘要")
+            st.markdown(get_status_badge_html(main_state.get("status") if main_state else "idle"), unsafe_allow_html=True)
+            if main_state:
+                st.caption(f"Job ID: {main_state.get('job_id', '-')}")
+                st.caption(f"Step: {main_state.get('current_step', '尚未開始')}")
+            else:
+                st.caption("目前無任務")
 
     # 只有未按開始時才顯示舊任務主區塊，避免舊/新同屏混淆
     if not start:
@@ -264,6 +305,7 @@ def main() -> None:
 
     # 新任務啟動後，僅顯示新任務資訊
     st.markdown("### Current Active Job")
+    st.markdown(get_status_badge_html("running"), unsafe_allow_html=True)
     st.caption(f"Job ID: {job_id}")
 
     progress_bar = st.progress(0)
@@ -368,10 +410,11 @@ def main() -> None:
     m3.metric("RTF", f"{rtf:.2f}x")
 
     if result.final_txt_path and result.final_txt_path.exists():
-        text = result.final_txt_path.read_text(encoding="utf-8", errors="ignore")
-        st.subheader("最終逐字稿預覽")
-        st.text_area("內容", value=text, height=400)
-        st.download_button("下載最終逐字稿 TXT", text.encode("utf-8"), file_name=result.final_txt_path.name, mime="text/plain")
+        with st.container(border=True):
+            text = result.final_txt_path.read_text(encoding="utf-8", errors="ignore")
+            st.subheader("最終逐字稿預覽")
+            st.text_area("內容", value=text, height=400)
+            st.download_button("下載最終逐字稿 TXT", text.encode("utf-8"), file_name=result.final_txt_path.name, mime="text/plain")
 
 
 if __name__ == "__main__":
